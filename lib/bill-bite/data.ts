@@ -8,6 +8,69 @@ export type BillItem = MenuItem & { quantity: number }
 export type Bill = { id: string; number: string; date: string; items: BillItem[]; subtotal: number; discount: number; tax: number; total: number; payment: PaymentMethod; createdBy: string }
 export type Expense = { id: string; date: string; category: string; description: string; amount: number }
 
+/* ── User Accounts (localStorage-based) ── */
+export type UserAccount = {
+  id: string
+  name: string
+  email: string
+  password: string           // stored as plain text in localStorage (local-only app)
+  role: Role
+  active: boolean
+  createdAt: string
+}
+
+const ACCOUNTS_KEY = 'bb-accounts'
+
+export function getAccounts(): UserAccount[] {
+  return getStored<UserAccount[]>(ACCOUNTS_KEY, [])
+}
+
+export function saveAccounts(accounts: UserAccount[]) {
+  saveStored(ACCOUNTS_KEY, accounts)
+}
+
+export function isFirstTimeSetup(): boolean {
+  if (typeof window === 'undefined') return false
+  return getAccounts().length === 0
+}
+
+export function authenticateUser(email: string, password: string): UserAccount | null {
+  const accounts = getAccounts()
+  return accounts.find(a => a.active && a.email.toLowerCase() === email.toLowerCase() && a.password === password) || null
+}
+
+export function createAccount(name: string, email: string, password: string, role: Role): UserAccount {
+  const account: UserAccount = {
+    id: `u-${Date.now()}`,
+    name,
+    email: email.toLowerCase(),
+    password,
+    role,
+    active: true,
+    createdAt: new Date().toISOString(),
+  }
+  const accounts = getAccounts()
+  accounts.push(account)
+  saveAccounts(accounts)
+  return account
+}
+
+export function updateAccount(id: string, updates: Partial<Pick<UserAccount, 'name' | 'email' | 'password' | 'active'>>) {
+  const accounts = getAccounts()
+  const idx = accounts.findIndex(a => a.id === id)
+  if (idx >= 0) {
+    accounts[idx] = { ...accounts[idx], ...updates }
+    saveAccounts(accounts)
+  }
+  return accounts
+}
+
+export function deleteAccount(id: string) {
+  const accounts = getAccounts().filter(a => a.id !== id)
+  saveAccounts(accounts)
+  return accounts
+}
+
 export type BusinessProfile = {
   restaurantName: string
   address: string
@@ -107,6 +170,7 @@ export function exportAllData() {
     billCounter: getStored('bb-bill-counter', 1),
     taxRate: getStored('bb-tax-rate', 5),
     businessProfile: getBusinessProfile(),
+    accounts: getAccounts(),
   }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
@@ -134,6 +198,7 @@ export function importData(file: File): Promise<{ menu: MenuItem[]; bills: Bill[
         if (data.billCounter) saveStored('bb-bill-counter', data.billCounter)
         if (data.taxRate) saveStored('bb-tax-rate', data.taxRate)
         if (data.businessProfile) saveStored('bb-business-profile', data.businessProfile)
+        if (data.accounts) saveAccounts(data.accounts)
         resolve({ menu: data.menu, bills: data.bills, expenses: data.expenses })
       } catch {
         reject(new Error('Failed to parse backup file'))

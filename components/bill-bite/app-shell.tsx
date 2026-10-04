@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
-import { LayoutDashboard, Plus, ReceiptText, Utensils, Wallet, ChartNoAxesCombined, Settings, LogOut, Menu as MenuIcon, Search, X, Minus, Trash2, Printer, Banknote, Smartphone, ChevronRight, Check, Download, Upload, Percent, Hash } from 'lucide-react'
-import { billsSeed, billProfit, currentUser, dateLabel, expensesSeed, getStored, menuSeed, money, saveStored, nextBillNumber, getTaxRate, saveTaxRate, getBusinessProfile, saveBusinessProfile, exportAllData, importData, expenseCategories, type Bill, type BillItem, type BusinessProfile, type Category, type Expense, type ExpenseCategory, type MenuItem, type PaymentMethod, type Role } from '@/lib/bill-bite/data'
+import { LayoutDashboard, Plus, ReceiptText, Utensils, Wallet, ChartNoAxesCombined, Settings, LogOut, Menu as MenuIcon, Search, X, Minus, Trash2, Printer, Banknote, Smartphone, ChevronRight, Check, Download, Upload, Percent, Hash, UserPlus, Eye, EyeOff, Shield, Key, Edit3, UserX } from 'lucide-react'
+import { billsSeed, billProfit, currentUser, dateLabel, expensesSeed, getStored, menuSeed, money, saveStored, nextBillNumber, getTaxRate, saveTaxRate, getBusinessProfile, saveBusinessProfile, exportAllData, importData, expenseCategories, isFirstTimeSetup, authenticateUser, createAccount, getAccounts, updateAccount, deleteAccount, type Bill, type BillItem, type BusinessProfile, type Category, type Expense, type ExpenseCategory, type MenuItem, type PaymentMethod, type Role, type UserAccount } from '@/lib/bill-bite/data'
 
 const nav = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard, owner: true },
@@ -57,6 +57,7 @@ export default function AppShell() {
   const [open, setOpen] = useState(false)
   const [greetingText, setGreetingText] = useState('')
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [needsSetup, setNeedsSetup] = useState(false)
 
   const toast = useCallback((message: string, type: Toast['type'] = 'success') => {
     const id = Date.now()
@@ -70,6 +71,12 @@ export default function AppShell() {
 
   useEffect(() => {
     setPath(window.location.pathname)
+    // Check if this is a first-time setup (no accounts exist)
+    if (isFirstTimeSetup()) {
+      setNeedsSetup(true)
+      setReady(true)
+      return
+    }
     // Check if a user session exists in localStorage
     const storedUser = getStored<{ name: string; role: Role } | null>('bb-user', null)
     if (storedUser) {
@@ -90,6 +97,21 @@ export default function AppShell() {
 
   // Show nothing until we've checked localStorage for a saved session
   if (!ready) return null
+
+  // First-time setup — show setup wizard
+  if (needsSetup) return (
+    <SetupWizard onComplete={(u) => {
+      setNeedsSetup(false)
+      setUser(u)
+      saveStored('bb-user', u)
+      setGreetingText(getGreeting(u.name))
+      // Load initial data after setup
+      setMenu(getStored<MenuItem[]>('bb-menu', menuSeed))
+      setBills(getStored<Bill[]>('bb-bills', billsSeed))
+      setExpenses(getStored<Expense[]>('bb-expenses', expensesSeed))
+      go('/')
+    }} />
+  )
 
   // No user logged in — show login screen
   if (!user) return (
@@ -175,6 +197,7 @@ export default function AppShell() {
                             onLogout={() => { localStorage.removeItem('bb-user'); setUser(null); toast('Logged out successfully', 'info'); go('/') }}
                             toast={toast}
                             onImport={(data) => { setMenu(data.menu); setBills(data.bills); setExpenses(data.expenses) }}
+                            onUserUpdate={(u) => { setUser(u); saveStored('bb-user', u); setGreetingText(getGreeting(u.name)) }}
                           />
           }
         </main>
@@ -890,16 +913,42 @@ function Reports({ bills, expenses }: { bills: Bill[]; expenses: Expense[] }) {
 
 /* ── Settings Page ── */
 // FIX #4: Export/Import, #7: Tax rate config, #13: Business profile
-function SettingsPage({ user, onLogout, toast, onImport }: {
+function SettingsPage({ user, onLogout, toast, onImport, onUserUpdate }: {
   user: { name: string; role: Role }
   onLogout: () => void
   toast: (msg: string, type?: 'success' | 'error' | 'info') => void
   onImport: (data: { menu: MenuItem[]; bills: Bill[]; expenses: Expense[] }) => void
+  onUserUpdate: (u: { name: string; role: Role }) => void
 }) {
   const initials = user.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [taxRate, setTaxRate] = useState(() => getTaxRate())
   const [profile, setProfile] = useState<BusinessProfile>(() => getBusinessProfile())
+
+  // Account management state
+  const [accounts, setAccountsList] = useState<UserAccount[]>(() => getAccounts())
+  const [showChangePass, setShowChangePass] = useState(false)
+  const [currentPass, setCurrentPass] = useState('')
+  const [newPass, setNewPass] = useState('')
+  const [confirmPass, setConfirmPass] = useState('')
+  const [showCurrentPass, setShowCurrentPass] = useState(false)
+  const [showNewPass, setShowNewPass] = useState(false)
+  const [passError, setPassError] = useState('')
+
+  // Add staff account state
+  const [showAddStaff, setShowAddStaff] = useState(false)
+  const [staffName, setStaffName] = useState('')
+  const [staffEmail, setStaffEmail] = useState('')
+  const [staffPass, setStaffPass] = useState('')
+  const [showStaffPass, setShowStaffPass] = useState(false)
+  const [staffError, setStaffError] = useState('')
+
+  // Edit account state
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editEmail, setEditEmail] = useState('')
+
+  const currentAccount = accounts.find(a => a.name === user.name && a.role === user.role)
 
   const handleExport = () => {
     exportAllData()
@@ -932,6 +981,70 @@ function SettingsPage({ user, onLogout, toast, onImport }: {
     toast('Business profile saved')
   }
 
+  const handleChangePassword = () => {
+    setPassError('')
+    if (!currentAccount) { setPassError('Account not found'); return }
+    if (currentAccount.password !== currentPass) { setPassError('Current password is incorrect'); return }
+    if (newPass.length < 4) { setPassError('New password must be at least 4 characters'); return }
+    if (newPass !== confirmPass) { setPassError('Passwords do not match'); return }
+    const updated = updateAccount(currentAccount.id, { password: newPass })
+    setAccountsList(updated)
+    setCurrentPass(''); setNewPass(''); setConfirmPass('')
+    setShowChangePass(false)
+    toast('Password changed successfully')
+  }
+
+  const handleAddStaff = () => {
+    setStaffError('')
+    if (!staffName.trim()) { setStaffError('Name is required'); return }
+    if (!staffEmail.trim()) { setStaffError('Email is required'); return }
+    if (staffPass.length < 4) { setStaffError('Password must be at least 4 characters'); return }
+    const existing = accounts.find(a => a.email.toLowerCase() === staffEmail.toLowerCase())
+    if (existing) { setStaffError('An account with this email already exists'); return }
+    createAccount(staffName.trim(), staffEmail.trim(), staffPass, 'staff')
+    setAccountsList(getAccounts())
+    setStaffName(''); setStaffEmail(''); setStaffPass('')
+    setShowAddStaff(false)
+    toast(`Staff account created for ${staffName.trim()}`)
+  }
+
+  const handleEditAccount = (id: string) => {
+    if (!editName.trim()) return
+    const acct = accounts.find(a => a.id === id)
+    if (!acct) return
+    // Check email uniqueness (if changed)
+    if (editEmail.toLowerCase() !== acct.email.toLowerCase()) {
+      const dup = accounts.find(a => a.id !== id && a.email.toLowerCase() === editEmail.toLowerCase())
+      if (dup) { toast('Email already in use', 'error'); return }
+    }
+    const updated = updateAccount(id, { name: editName.trim(), email: editEmail.trim().toLowerCase() })
+    setAccountsList(updated)
+    setEditingId(null)
+    // If the user edited their own account, update the session
+    if (acct.name === user.name && acct.role === user.role) {
+      onUserUpdate({ name: editName.trim(), role: user.role })
+    }
+    toast('Account updated')
+  }
+
+  const handleDeleteAccount = (id: string) => {
+    const acct = accounts.find(a => a.id === id)
+    if (!acct) return
+    if (acct.role === 'owner') { toast('Cannot delete the owner account', 'error'); return }
+    const updated = deleteAccount(id)
+    setAccountsList(updated)
+    toast(`${acct.name}'s account deleted`)
+  }
+
+  const handleToggleActive = (id: string) => {
+    const acct = accounts.find(a => a.id === id)
+    if (!acct) return
+    if (acct.role === 'owner') { toast('Cannot deactivate the owner account', 'error'); return }
+    const updated = updateAccount(id, { active: !acct.active })
+    setAccountsList(updated)
+    toast(`${acct.name}'s account ${acct.active ? 'deactivated' : 'activated'}`)
+  }
+
   return (
     <>
       <Heading eyebrow="Account" title="Settings" />
@@ -955,6 +1068,218 @@ function SettingsPage({ user, onLogout, toast, onImport }: {
           </button>
         </div>
       </section>
+
+      {/* Change Password */}
+      <section className="mt-6 max-w-xl rounded-2xl border border-border bg-card p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="flex items-center gap-2 font-serif text-xl font-bold"><Key size={20} /> Change Password</h2>
+            <p className="mt-1 text-sm text-muted-foreground">Update your login password.</p>
+          </div>
+          <button
+            onClick={() => { setShowChangePass(!showChangePass); setPassError(''); setCurrentPass(''); setNewPass(''); setConfirmPass('') }}
+            className="rounded-xl border border-border px-4 py-2.5 text-sm font-bold hover:bg-muted transition-colors"
+          >
+            {showChangePass ? 'Cancel' : 'Change'}
+          </button>
+        </div>
+        {showChangePass && (
+          <div className="mt-5 grid gap-3 border-t border-border pt-5">
+            {passError && <p className="rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive">{passError}</p>}
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+              Current Password
+              <div className="relative mt-1">
+                <input
+                  type={showCurrentPass ? 'text' : 'password'}
+                  value={currentPass}
+                  onChange={e => setCurrentPass(e.target.value)}
+                  placeholder="Enter current password"
+                  className="w-full rounded-xl border border-input bg-background px-4 py-3 pr-12 outline-none focus:ring-2 focus:ring-ring"
+                />
+                <button type="button" onClick={() => setShowCurrentPass(!showCurrentPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+                  {showCurrentPass ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </label>
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+              New Password
+              <div className="relative mt-1">
+                <input
+                  type={showNewPass ? 'text' : 'password'}
+                  value={newPass}
+                  onChange={e => setNewPass(e.target.value)}
+                  placeholder="Enter new password (min 4 chars)"
+                  className="w-full rounded-xl border border-input bg-background px-4 py-3 pr-12 outline-none focus:ring-2 focus:ring-ring"
+                />
+                <button type="button" onClick={() => setShowNewPass(!showNewPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+                  {showNewPass ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </label>
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+              Confirm New Password
+              <input
+                type="password"
+                value={confirmPass}
+                onChange={e => setConfirmPass(e.target.value)}
+                placeholder="Confirm new password"
+                className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
+              />
+            </label>
+            <button
+              onClick={handleChangePassword}
+              className="mt-1 rounded-xl bg-primary px-5 py-3 text-sm font-bold text-primary-foreground hover:opacity-90 transition-opacity"
+            >
+              Update Password
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* Manage Accounts — Owner Only */}
+      {user.role === 'owner' && (
+        <section className="mt-6 max-w-xl rounded-2xl border border-border bg-card p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="flex items-center gap-2 font-serif text-xl font-bold"><Shield size={20} /> Manage Accounts</h2>
+              <p className="mt-1 text-sm text-muted-foreground">Add, edit, or remove staff accounts.</p>
+            </div>
+            <button
+              onClick={() => { setShowAddStaff(!showAddStaff); setStaffError(''); setStaffName(''); setStaffEmail(''); setStaffPass('') }}
+              className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground hover:opacity-90 transition-opacity"
+            >
+              <UserPlus size={16} /> {showAddStaff ? 'Cancel' : 'Add Staff'}
+            </button>
+          </div>
+
+          {/* Add Staff Form */}
+          {showAddStaff && (
+            <div className="mt-5 rounded-xl border border-primary/20 bg-primary/5 p-5 grid gap-3">
+              <p className="text-sm font-bold text-primary">New Staff Account</p>
+              {staffError && <p className="rounded-xl bg-destructive/10 px-4 py-3 text-sm text-destructive">{staffError}</p>}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Full Name
+                  <input
+                    value={staffName}
+                    onChange={e => setStaffName(e.target.value)}
+                    placeholder="e.g. Neha Sharma"
+                    className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </label>
+                <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  Email
+                  <input
+                    type="email"
+                    value={staffEmail}
+                    onChange={e => setStaffEmail(e.target.value)}
+                    placeholder="staff@restaurant.com"
+                    className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </label>
+              </div>
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                Password
+                <div className="relative mt-1">
+                  <input
+                    type={showStaffPass ? 'text' : 'password'}
+                    value={staffPass}
+                    onChange={e => setStaffPass(e.target.value)}
+                    placeholder="Min 4 characters"
+                    className="w-full rounded-xl border border-input bg-background px-4 py-3 pr-12 outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <button type="button" onClick={() => setShowStaffPass(!showStaffPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+                    {showStaffPass ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </label>
+              <button
+                onClick={handleAddStaff}
+                className="rounded-xl bg-primary px-5 py-3 text-sm font-bold text-primary-foreground hover:opacity-90 transition-opacity"
+              >
+                Create Staff Account
+              </button>
+            </div>
+          )}
+
+          {/* Account List */}
+          <div className="mt-5 grid gap-2">
+            {accounts.map(acct => (
+              <div key={acct.id} className={`rounded-xl border p-4 transition-all ${acct.active ? 'border-border bg-background' : 'border-border/50 bg-muted/50 opacity-60'}`}>
+                {editingId === acct.id ? (
+                  /* Edit Mode */
+                  <div className="grid gap-3">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                        Name
+                        <input
+                          value={editName}
+                          onChange={e => setEditName(e.target.value)}
+                          className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-2.5 outline-none focus:ring-2 focus:ring-ring text-sm font-normal normal-case tracking-normal"
+                        />
+                      </label>
+                      <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                        Email
+                        <input
+                          type="email"
+                          value={editEmail}
+                          onChange={e => setEditEmail(e.target.value)}
+                          className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-2.5 outline-none focus:ring-2 focus:ring-ring text-sm font-normal normal-case tracking-normal"
+                        />
+                      </label>
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => handleEditAccount(acct.id)} className="rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground hover:opacity-90 transition-opacity">Save</button>
+                      <button onClick={() => setEditingId(null)} className="rounded-lg border border-border px-4 py-2 text-xs font-bold hover:bg-muted transition-colors">Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  /* View Mode */
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`grid size-10 place-items-center rounded-full text-xs font-bold ${acct.role === 'owner' ? 'bg-primary text-primary-foreground' : 'bg-accent/20 text-accent'}`}>
+                        {acct.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold">{acct.name}{!acct.active && <span className="ml-2 text-xs text-muted-foreground">(inactive)</span>}</p>
+                        <p className="text-xs text-muted-foreground">{acct.email} · {acct.role}</p>
+                      </div>
+                    </div>
+                    {acct.role !== 'owner' && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => { setEditingId(acct.id); setEditName(acct.name); setEditEmail(acct.email) }}
+                          className="rounded-lg p-2 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                          title="Edit account"
+                        >
+                          <Edit3 size={15} />
+                        </button>
+                        <button
+                          onClick={() => handleToggleActive(acct.id)}
+                          className={`rounded-lg p-2 transition-colors ${acct.active ? 'text-muted-foreground hover:bg-muted hover:text-foreground' : 'text-primary hover:bg-primary/10'}`}
+                          title={acct.active ? 'Deactivate account' : 'Activate account'}
+                        >
+                          {acct.active ? <UserX size={15} /> : <Check size={15} />}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteAccount(acct.id)}
+                          className="rounded-lg p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                          title="Delete account"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            {accounts.length === 0 && (
+              <p className="py-8 text-center text-sm text-muted-foreground">No accounts found. This shouldn&apos;t happen — try reloading the page.</p>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* FIX #7: Tax Rate Configuration */}
       <section className="mt-6 max-w-xl rounded-2xl border border-border bg-card p-6">
@@ -1073,52 +1398,200 @@ function SettingsPage({ user, onLogout, toast, onImport }: {
   )
 }
 
+/* ── Setup Wizard (first-time only) ── */
+function SetupWizard({ onComplete }: { onComplete: (u: { name: string; role: Role }) => void }) {
+  const [step, setStep] = useState(1)
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [pass, setPass] = useState('')
+  const [confirmPass, setConfirmPass] = useState('')
+  const [showPass, setShowPass] = useState(false)
+  const [error, setError] = useState('')
+
+  const handleFinish = () => {
+    setError('')
+    if (!name.trim()) { setError('Please enter your name'); return }
+    if (!email.trim()) { setError('Please enter your email'); return }
+    if (pass.length < 4) { setError('Password must be at least 4 characters'); return }
+    if (pass !== confirmPass) { setError('Passwords do not match'); return }
+    const account = createAccount(name.trim(), email.trim(), pass, 'owner')
+    onComplete({ name: account.name, role: 'owner' })
+  }
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-background p-5">
+      <div className="w-full max-w-md rounded-3xl border border-border bg-card p-7 shadow-xl">
+        <div className="grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
+          <Utensils />
+        </div>
+
+        {step === 1 && (
+          <>
+            <p className="mt-8 font-mono text-xs uppercase tracking-widest text-accent">Welcome to</p>
+            <h1 className="mt-2 font-serif text-4xl font-bold">Bill Bite</h1>
+            <p className="mt-3 text-sm leading-6 text-muted-foreground">
+              Let&apos;s set up your owner account. This is a one-time setup — you&apos;ll use these credentials to sign in.
+            </p>
+            <div className="mt-8 rounded-xl border border-primary/20 bg-primary/5 p-4">
+              <p className="text-sm font-bold text-primary">🔐 What you&apos;ll set up:</p>
+              <ul className="mt-2 grid gap-1 text-sm text-muted-foreground">
+                <li className="flex items-center gap-2"><Check size={14} className="text-primary" /> Your name (shown in the app)</li>
+                <li className="flex items-center gap-2"><Check size={14} className="text-primary" /> Your email (used to sign in)</li>
+                <li className="flex items-center gap-2"><Check size={14} className="text-primary" /> A password (your choice)</li>
+              </ul>
+            </div>
+            <button
+              onClick={() => setStep(2)}
+              className="mt-6 w-full rounded-xl bg-primary py-3.5 font-bold text-primary-foreground hover:opacity-90 transition-all active:scale-95"
+            >
+              Get Started <ChevronRight size={16} className="inline ml-1" />
+            </button>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <p className="mt-8 font-mono text-xs uppercase tracking-widest text-accent">Step 1 of 2</p>
+            <h1 className="mt-2 font-serif text-3xl font-bold">Your Details</h1>
+            <p className="mt-2 text-sm text-muted-foreground">Enter the owner&apos;s name and email address.</p>
+            {error && <p className="mt-4 rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+            <label className="mt-6 block text-sm font-semibold">
+              Full Name
+              <input
+                value={name}
+                onChange={e => { setName(e.target.value); setError('') }}
+                className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
+                placeholder="e.g. Arjun Kapoor"
+                autoFocus
+              />
+            </label>
+            <label className="mt-4 block text-sm font-semibold">
+              Email
+              <input
+                value={email}
+                onChange={e => { setEmail(e.target.value); setError('') }}
+                className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
+                type="email"
+                placeholder="owner@restaurant.com"
+              />
+            </label>
+            <div className="mt-6 flex gap-3">
+              <button onClick={() => setStep(1)} className="rounded-xl border border-border px-5 py-3 text-sm font-bold hover:bg-muted transition-colors">Back</button>
+              <button
+                onClick={() => {
+                  setError('')
+                  if (!name.trim()) { setError('Please enter your name'); return }
+                  if (!email.trim()) { setError('Please enter your email'); return }
+                  setStep(3)
+                }}
+                className="flex-1 rounded-xl bg-primary py-3 font-bold text-primary-foreground hover:opacity-90 transition-all active:scale-95"
+              >
+                Next <ChevronRight size={16} className="inline ml-1" />
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 3 && (
+          <>
+            <p className="mt-8 font-mono text-xs uppercase tracking-widest text-accent">Step 2 of 2</p>
+            <h1 className="mt-2 font-serif text-3xl font-bold">Set Password</h1>
+            <p className="mt-2 text-sm text-muted-foreground">Choose a secure password for your account.</p>
+            {error && <p className="mt-4 rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+            <label className="mt-6 block text-sm font-semibold">
+              Password
+              <div className="relative mt-2">
+                <input
+                  value={pass}
+                  onChange={e => { setPass(e.target.value); setError('') }}
+                  className="w-full rounded-xl border border-input bg-background px-4 py-3 pr-12 outline-none focus:ring-2 focus:ring-ring"
+                  type={showPass ? 'text' : 'password'}
+                  placeholder="Min 4 characters"
+                  autoFocus
+                />
+                <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+                  {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </label>
+            <label className="mt-4 block text-sm font-semibold">
+              Confirm Password
+              <input
+                value={confirmPass}
+                onChange={e => { setConfirmPass(e.target.value); setError('') }}
+                className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
+                type="password"
+                placeholder="Re-enter password"
+              />
+            </label>
+            <div className="mt-6 flex gap-3">
+              <button onClick={() => setStep(2)} className="rounded-xl border border-border px-5 py-3 text-sm font-bold hover:bg-muted transition-colors">Back</button>
+              <button
+                onClick={handleFinish}
+                className="flex-1 rounded-xl bg-primary py-3 font-bold text-primary-foreground hover:opacity-90 transition-all active:scale-95"
+              >
+                <Check size={16} className="inline mr-1" /> Create Account
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </main>
+  )
+}
+
 /* ── Login ── */
-// FIX #3 (partial): Removed the plaintext password hint
 function Login({ onLogin }: { onLogin: (u: { name: string; role: Role }) => void }) {
   const [email, setEmail] = useState('')
   const [pass, setPass] = useState('')
   const [error, setError] = useState('')
+  const [showPass, setShowPass] = useState(false)
 
   return (
     <main className="grid min-h-screen place-items-center bg-background p-5">
       <form
         onSubmit={e => {
           e.preventDefault()
-          const role = email.includes('staff') ? 'staff' : 'owner'
-          if ((role === 'owner' && pass !== 'owner123') || (role === 'staff' && pass !== 'staff123')) {
-            return setError('That password does not match the selected account.')
-          }
-          onLogin({ name: role === 'owner' ? 'Arjun Kapoor' : 'Neha Sharma', role })
+          setError('')
+          if (!email.trim() || !pass) { setError('Please enter email and password'); return }
+          const account = authenticateUser(email, pass)
+          if (!account) { setError('Invalid email or password. Please try again.'); return }
+          onLogin({ name: account.name, role: account.role })
         }}
         className="w-full max-w-md rounded-3xl border border-border bg-card p-7 shadow-xl"
       >
         <div className="grid size-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
           <Utensils />
         </div>
-        <p className="mt-8 font-mono text-xs uppercase tracking-widest text-accent">Welcome to</p>
+        <p className="mt-8 font-mono text-xs uppercase tracking-widest text-accent">Welcome back to</p>
         <h1 className="mt-2 font-serif text-4xl font-bold">Bill Bite</h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">Simple billing and clear numbers for your restaurant.</p>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">Sign in with your account credentials.</p>
         {error && <p className="mt-5 rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
         <label className="mt-7 block text-sm font-semibold">
           Email
           <input
             value={email}
-            onChange={e => setEmail(e.target.value)}
+            onChange={e => { setEmail(e.target.value); setError('') }}
             className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
             type="email"
             placeholder="Enter your email"
+            autoFocus
           />
         </label>
         <label className="mt-4 block text-sm font-semibold">
           Password
-          <input
-            value={pass}
-            onChange={e => setPass(e.target.value)}
-            className="mt-2 w-full rounded-xl border border-input bg-background px-4 py-3 outline-none focus:ring-2 focus:ring-ring"
-            type="password"
-            placeholder="Enter your password"
-          />
+          <div className="relative mt-2">
+            <input
+              value={pass}
+              onChange={e => { setPass(e.target.value); setError('') }}
+              className="w-full rounded-xl border border-input bg-background px-4 py-3 pr-12 outline-none focus:ring-2 focus:ring-ring"
+              type={showPass ? 'text' : 'password'}
+              placeholder="Enter your password"
+            />
+            <button type="button" onClick={() => setShowPass(!showPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+              {showPass ? <EyeOff size={18} /> : <Eye size={18} />}
+            </button>
+          </div>
         </label>
         <button className="mt-6 w-full rounded-xl bg-primary py-3.5 font-bold text-primary-foreground hover:opacity-90 transition-all active:scale-95">
           Sign in
